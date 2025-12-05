@@ -1,8 +1,8 @@
 """
-Dynatrace Service Topology Exporter - Desktop Application
+Dynatrace Recursive Topology Discoverer - Desktop Application
 
-A modern PySide6-based GUI application for extracting service-to-service
-topology from Dynatrace Managed environments.
+A modern PySide6-based GUI application with Garanti BBVA corporate theme
+for discovering service-to-service topology using BFS traversal.
 """
 
 import os
@@ -10,10 +10,10 @@ import sys
 import subprocess
 import platform
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot, QSize
-from PySide6.QtGui import QFont, QIcon, QPalette, QColor
+from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtGui import QFont, QColor, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -24,11 +24,10 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QLabel,
     QLineEdit,
+    QTextEdit,
     QSpinBox,
-    QComboBox,
     QCheckBox,
     QPushButton,
-    QTextEdit,
     QProgressBar,
     QFileDialog,
     QMessageBox,
@@ -40,21 +39,52 @@ from dynatrace_client import ClientConfig, DynatraceClient, DynatraceAPIError
 from topology_exporter import TopologyExporter, ExportResult
 
 
-# ============================================================================
+# =============================================================================
+# Garanti BBVA Corporate Colors
+# =============================================================================
+
+class GarantiColors:
+    """Garanti BBVA corporate color palette."""
+    PRIMARY_GREEN = "#008558"       # Main brand green
+    DARK_GREEN = "#006847"          # Darker green for hover states
+    LIGHT_GREEN = "#00A86B"         # Lighter green for accents
+    WHITE = "#FFFFFF"               # Clean white background
+    LIGHT_GREY = "#F4F6F6"          # Light grey for sections
+    MEDIUM_GREY = "#E8ECEC"         # Medium grey for borders
+    DARK_GREY = "#2C3E50"           # Dark grey for text
+    TEXT_SECONDARY = "#5D6D7E"      # Secondary text color
+    ERROR_RED = "#E74C3C"           # Error state
+    WARNING_ORANGE = "#E67E22"      # Warning state
+    SUCCESS_GREEN = "#27AE60"       # Success state (different from brand)
+
+
+# =============================================================================
 # Worker Thread for Background Export
-# ============================================================================
+# =============================================================================
 
 class ExportWorker(QThread):
-    """Background worker thread for topology export operation."""
+    """Background worker thread for recursive topology discovery."""
     
     log_message = Signal(str)
-    progress_update = Signal(int, int, str)  # entities, edges, status
+    progress_update = Signal(int, int, int, str)  # depth, services, edges, status
     finished = Signal(object)  # ExportResult
     
-    def __init__(self, config: ClientConfig, output_path: str):
+    def __init__(
+        self,
+        config: ClientConfig,
+        root_ids: List[str],
+        output_path: str,
+        export_excel: bool,
+        export_csv: bool,
+        export_graphml: bool,
+    ):
         super().__init__()
         self.config = config
+        self.root_ids = root_ids
         self.output_path = output_path
+        self.export_excel = export_excel
+        self.export_csv = export_csv
+        self.export_graphml = export_graphml
         self._exporter: Optional[TopologyExporter] = None
         self._client: Optional[DynatraceClient] = None
 
@@ -72,7 +102,13 @@ class ExportWorker(QThread):
                 progress_callback=self._emit_progress
             )
             
-            result = self._exporter.run(self.output_path)
+            result = self._exporter.run(
+                root_ids=self.root_ids,
+                output_path=self.output_path,
+                export_excel=self.export_excel,
+                export_csv=self.export_csv,
+                export_graphml=self.export_graphml,
+            )
             self.finished.emit(result)
             
         except Exception as e:
@@ -89,7 +125,8 @@ class ExportWorker(QThread):
 
     def _emit_progress(self, progress):
         self.progress_update.emit(
-            progress.entities_fetched,
+            progress.current_depth,
+            progress.services_discovered,
             progress.edges_found,
             progress.status
         )
@@ -115,13 +152,12 @@ class TestConnectionWorker(QThread):
             response = client.test_connection()
             client.close()
             
-            # Check if we got any entities back
             entities = response.get("entities", [])
             total = response.get("totalCount", len(entities))
             
             self.finished.emit(
                 True,
-                f"Connection successful!\n\nTotal SERVICE entities available: {total}"
+                f"✓ Connection successful!\n\nTotal SERVICE entities available: {total}"
             )
         except DynatraceAPIError as e:
             self.finished.emit(False, f"Connection failed:\n\n{e.message}")
@@ -129,12 +165,12 @@ class TestConnectionWorker(QThread):
             self.finished.emit(False, f"Unexpected error:\n\n{str(e)}")
 
 
-# ============================================================================
+# =============================================================================
 # Main Application Window
-# ============================================================================
+# =============================================================================
 
 class MainWindow(QMainWindow):
-    """Main application window for Dynatrace Topology Exporter."""
+    """Main application window with Garanti BBVA theme."""
 
     def __init__(self):
         super().__init__()
@@ -142,93 +178,69 @@ class MainWindow(QMainWindow):
         self._test_worker: Optional[TestConnectionWorker] = None
         self._setup_ui()
         self._connect_signals()
-        self._apply_styles()
+        self._apply_garanti_theme()
 
     def _setup_ui(self):
         """Build the user interface."""
-        self.setWindowTitle("Dynatrace Service Topology Exporter")
-        self.setMinimumSize(700, 750)
-        self.resize(750, 800)
+        self.setWindowTitle("Dynatrace Recursive Topology Discoverer")
+        self.setMinimumSize(800, 850)
+        self.resize(850, 900)
 
         # Central widget and main layout
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
-        main_layout.setSpacing(12)
-        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(16)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+
+        # ===== Header =====
+        header = QLabel("Dynatrace Service Topology Discoverer")
+        header.setObjectName("header")
+        header.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(header)
 
         # ===== Connection Settings Group =====
-        conn_group = QGroupBox("Dynatrace Connection Settings")
+        conn_group = QGroupBox("Dynatrace Connection")
+        conn_group.setObjectName("settingsGroup")
         conn_layout = QFormLayout()
-        conn_layout.setSpacing(8)
+        conn_layout.setSpacing(12)
+        conn_layout.setContentsMargins(16, 20, 16, 16)
 
+        # Base URL
         self.base_url_input = QLineEdit()
-        self.base_url_input.setPlaceholderText("https://my-activegate:9999/e/environment-id/api/v2")
+        self.base_url_input.setPlaceholderText("https://activegate-host:9999/e/environment-id/api/v2")
+        self.base_url_input.setObjectName("inputField")
         conn_layout.addRow("Base URL:", self.base_url_input)
 
-        # Timeframe selector
-        timeframe_widget = QWidget()
-        timeframe_layout = QHBoxLayout(timeframe_widget)
-        timeframe_layout.setContentsMargins(0, 0, 0, 0)
-        timeframe_layout.setSpacing(8)
+        # Batch Size
+        batch_widget = QWidget()
+        batch_layout = QHBoxLayout(batch_widget)
+        batch_layout.setContentsMargins(0, 0, 0, 0)
+        batch_layout.setSpacing(8)
+        
+        self.batch_size_spin = QSpinBox()
+        self.batch_size_spin.setRange(10, 100)
+        self.batch_size_spin.setValue(50)
+        self.batch_size_spin.setFixedWidth(80)
+        self.batch_size_spin.setObjectName("inputField")
+        batch_layout.addWidget(self.batch_size_spin)
+        batch_layout.addWidget(QLabel("IDs per API call (10-100)"))
+        batch_layout.addStretch()
+        conn_layout.addRow("Batch Size:", batch_widget)
 
-        self.timeframe_combo = QComboBox()
-        self.timeframe_combo.addItems(["Default (Dynatrace default)", "Custom"])
-        self.timeframe_combo.setFixedWidth(200)
-        timeframe_layout.addWidget(self.timeframe_combo)
-        timeframe_layout.addStretch()
-        conn_layout.addRow("Timeframe:", timeframe_widget)
-
-        # Custom timeframe inputs (initially hidden)
-        self.custom_time_widget = QWidget()
-        custom_time_layout = QHBoxLayout(self.custom_time_widget)
-        custom_time_layout.setContentsMargins(0, 0, 0, 0)
-        custom_time_layout.setSpacing(8)
-
-        self.from_input = QLineEdit()
-        self.from_input.setPlaceholderText("e.g., now-7d")
-        self.from_input.setFixedWidth(150)
-        custom_time_layout.addWidget(QLabel("From:"))
-        custom_time_layout.addWidget(self.from_input)
-
-        self.to_input = QLineEdit()
-        self.to_input.setPlaceholderText("e.g., now")
-        self.to_input.setFixedWidth(150)
-        custom_time_layout.addWidget(QLabel("To:"))
-        custom_time_layout.addWidget(self.to_input)
-        custom_time_layout.addStretch()
-
-        self.custom_time_widget.setVisible(False)
-        conn_layout.addRow("", self.custom_time_widget)
-
-        # Page size
-        page_size_widget = QWidget()
-        page_size_layout = QHBoxLayout(page_size_widget)
-        page_size_layout.setContentsMargins(0, 0, 0, 0)
-        page_size_layout.setSpacing(8)
-
-        self.page_size_spin = QSpinBox()
-        self.page_size_spin.setRange(1, 500)
-        self.page_size_spin.setValue(500)
-        self.page_size_spin.setFixedWidth(100)
-        page_size_layout.addWidget(self.page_size_spin)
-        page_size_layout.addWidget(QLabel("(max 500)"))
-        page_size_layout.addStretch()
-        conn_layout.addRow("Page Size:", page_size_widget)
-
-        # SSL verification
+        # SSL Verification (default unchecked)
         ssl_widget = QWidget()
         ssl_layout = QHBoxLayout(ssl_widget)
         ssl_layout.setContentsMargins(0, 0, 0, 0)
-        ssl_layout.setSpacing(8)
+        ssl_layout.setSpacing(12)
 
         self.ssl_checkbox = QCheckBox("Verify SSL certificates")
-        self.ssl_checkbox.setChecked(True)
+        self.ssl_checkbox.setChecked(False)  # Default to unchecked for on-prem
         ssl_layout.addWidget(self.ssl_checkbox)
 
-        self.ssl_warning = QLabel("⚠ SSL verification disabled - use only in trusted networks")
-        self.ssl_warning.setStyleSheet("color: #e67e22; font-weight: bold;")
-        self.ssl_warning.setVisible(False)
+        self.ssl_warning = QLabel("⚠ SSL verification disabled")
+        self.ssl_warning.setObjectName("warningLabel")
+        self.ssl_warning.setVisible(True)
         ssl_layout.addWidget(self.ssl_warning)
         ssl_layout.addStretch()
         conn_layout.addRow("", ssl_widget)
@@ -236,78 +248,130 @@ class MainWindow(QMainWindow):
         conn_group.setLayout(conn_layout)
         main_layout.addWidget(conn_group)
 
+        # ===== Root Services Group =====
+        root_group = QGroupBox("Root Service IDs")
+        root_group.setObjectName("settingsGroup")
+        root_layout = QVBoxLayout()
+        root_layout.setSpacing(8)
+        root_layout.setContentsMargins(16, 20, 16, 16)
+
+        root_label = QLabel("Enter Service IDs to start topology discovery (one per line):")
+        root_label.setObjectName("helpText")
+        root_layout.addWidget(root_label)
+
+        self.root_ids_input = QTextEdit()
+        self.root_ids_input.setPlaceholderText(
+            "SERVICE-1234567890ABCDEF\n"
+            "SERVICE-FEDCBA0987654321\n"
+            "SERVICE-..."
+        )
+        self.root_ids_input.setObjectName("multiLineInput")
+        self.root_ids_input.setMinimumHeight(100)
+        self.root_ids_input.setMaximumHeight(150)
+        root_layout.addWidget(self.root_ids_input)
+
+        root_group.setLayout(root_layout)
+        main_layout.addWidget(root_group)
+
         # ===== Authentication Group =====
         auth_group = QGroupBox("Authentication")
+        auth_group.setObjectName("settingsGroup")
         auth_layout = QVBoxLayout()
         auth_layout.setSpacing(8)
+        auth_layout.setContentsMargins(16, 20, 16, 16)
 
         auth_info = QLabel(
             "API token is read from environment variable: DYNATRACE_API_TOKEN\n"
-            "The token requires 'entities.read' scope."
+            "Required scope: entities.read"
         )
+        auth_info.setObjectName("helpText")
         auth_info.setWordWrap(True)
         auth_layout.addWidget(auth_info)
 
         self.check_token_btn = QPushButton("Check Token")
+        self.check_token_btn.setObjectName("secondaryButton")
         self.check_token_btn.setFixedWidth(120)
         auth_layout.addWidget(self.check_token_btn)
 
         auth_group.setLayout(auth_layout)
         main_layout.addWidget(auth_group)
 
-        # ===== Output Settings Group =====
-        output_group = QGroupBox("Output Settings")
-        output_layout = QHBoxLayout()
-        output_layout.setSpacing(8)
+        # ===== Export Settings Group =====
+        export_group = QGroupBox("Export Settings")
+        export_group.setObjectName("settingsGroup")
+        export_layout = QVBoxLayout()
+        export_layout.setSpacing(12)
+        export_layout.setContentsMargins(16, 20, 16, 16)
+
+        # Output path
+        path_widget = QWidget()
+        path_layout = QHBoxLayout(path_widget)
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        path_layout.setSpacing(8)
 
         self.output_path_input = QLineEdit()
-        self.output_path_input.setPlaceholderText("Select output CSV file...")
-        output_layout.addWidget(self.output_path_input)
+        self.output_path_input.setPlaceholderText("Select output file location...")
+        self.output_path_input.setObjectName("inputField")
+        path_layout.addWidget(self.output_path_input)
 
         self.browse_btn = QPushButton("Browse...")
+        self.browse_btn.setObjectName("secondaryButton")
         self.browse_btn.setFixedWidth(100)
-        output_layout.addWidget(self.browse_btn)
+        path_layout.addWidget(self.browse_btn)
+        export_layout.addWidget(path_widget)
 
-        output_group.setLayout(output_layout)
-        main_layout.addWidget(output_group)
+        # Export format checkboxes
+        format_widget = QWidget()
+        format_layout = QHBoxLayout(format_widget)
+        format_layout.setContentsMargins(0, 0, 0, 0)
+        format_layout.setSpacing(24)
+
+        format_label = QLabel("Export Formats:")
+        format_layout.addWidget(format_label)
+
+        self.excel_checkbox = QCheckBox("Excel (.xlsx)")
+        self.excel_checkbox.setChecked(True)
+        format_layout.addWidget(self.excel_checkbox)
+
+        self.csv_checkbox = QCheckBox("CSV (.csv)")
+        self.csv_checkbox.setChecked(False)
+        format_layout.addWidget(self.csv_checkbox)
+
+        self.graphml_checkbox = QCheckBox("GraphML (.graphml)")
+        self.graphml_checkbox.setChecked(False)
+        format_layout.addWidget(self.graphml_checkbox)
+
+        format_layout.addStretch()
+        export_layout.addWidget(format_widget)
+
+        export_group.setLayout(export_layout)
+        main_layout.addWidget(export_group)
 
         # ===== Control Buttons =====
         control_widget = QWidget()
         control_layout = QHBoxLayout(control_widget)
-        control_layout.setContentsMargins(0, 0, 0, 0)
+        control_layout.setContentsMargins(0, 8, 0, 8)
         control_layout.setSpacing(12)
 
         self.test_conn_btn = QPushButton("Test Connection")
-        self.test_conn_btn.setFixedHeight(36)
+        self.test_conn_btn.setObjectName("secondaryButton")
+        self.test_conn_btn.setFixedHeight(40)
         control_layout.addWidget(self.test_conn_btn)
 
-        self.run_export_btn = QPushButton("▶  Run Topology Export")
-        self.run_export_btn.setFixedHeight(36)
-        self.run_export_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #27ae60;
-                color: white;
-                font-weight: bold;
-                border: none;
-                border-radius: 4px;
-                padding: 0 20px;
-            }
-            QPushButton:hover {
-                background-color: #2ecc71;
-            }
-            QPushButton:disabled {
-                background-color: #95a5a6;
-            }
-        """)
+        self.run_export_btn = QPushButton("▶  Discover Topology")
+        self.run_export_btn.setObjectName("primaryButton")
+        self.run_export_btn.setFixedHeight(40)
         control_layout.addWidget(self.run_export_btn)
 
         self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setFixedHeight(36)
+        self.cancel_btn.setObjectName("dangerButton")
+        self.cancel_btn.setFixedHeight(40)
         self.cancel_btn.setEnabled(False)
         control_layout.addWidget(self.cancel_btn)
 
         self.open_folder_btn = QPushButton("Open Output Folder")
-        self.open_folder_btn.setFixedHeight(36)
+        self.open_folder_btn.setObjectName("secondaryButton")
+        self.open_folder_btn.setFixedHeight(40)
         self.open_folder_btn.setEnabled(False)
         control_layout.addWidget(self.open_folder_btn)
 
@@ -323,44 +387,48 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 0)  # Indeterminate
         self.progress_bar.setVisible(False)
-        self.progress_bar.setFixedHeight(20)
+        self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setObjectName("progressBar")
         progress_layout.addWidget(self.progress_bar)
 
         self.stats_label = QLabel("")
-        self.stats_label.setMinimumWidth(200)
+        self.stats_label.setObjectName("statsLabel")
+        self.stats_label.setMinimumWidth(300)
         progress_layout.addWidget(self.stats_label)
 
         main_layout.addWidget(progress_widget)
 
         # ===== Log Area =====
-        log_group = QGroupBox("Logs")
+        log_group = QGroupBox("Discovery Log")
+        log_group.setObjectName("settingsGroup")
         log_layout = QVBoxLayout()
-        log_layout.setSpacing(4)
+        log_layout.setSpacing(8)
+        log_layout.setContentsMargins(16, 20, 16, 16)
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setFont(QFont("Consolas", 9))
-        self.log_text.setMinimumHeight(200)
+        self.log_text.setObjectName("logArea")
+        self.log_text.setMinimumHeight(180)
         log_layout.addWidget(self.log_text)
 
-        clear_btn_layout = QHBoxLayout()
+        log_btn_layout = QHBoxLayout()
         self.clear_log_btn = QPushButton("Clear Logs")
+        self.clear_log_btn.setObjectName("secondaryButton")
         self.clear_log_btn.setFixedWidth(100)
-        clear_btn_layout.addWidget(self.clear_log_btn)
-        clear_btn_layout.addStretch()
-        log_layout.addLayout(clear_btn_layout)
+        log_btn_layout.addWidget(self.clear_log_btn)
+        log_btn_layout.addStretch()
+        log_layout.addLayout(log_btn_layout)
 
         log_group.setLayout(log_layout)
         main_layout.addWidget(log_group)
 
         # ===== Status Bar =====
         self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("padding: 4px; color: #7f8c8d;")
+        self.status_label.setObjectName("statusBar")
         main_layout.addWidget(self.status_label)
 
     def _connect_signals(self):
         """Connect UI signals to slots."""
-        self.timeframe_combo.currentIndexChanged.connect(self._on_timeframe_changed)
         self.ssl_checkbox.stateChanged.connect(self._on_ssl_changed)
         self.check_token_btn.clicked.connect(self._check_token)
         self.browse_btn.clicked.connect(self._browse_output)
@@ -370,56 +438,216 @@ class MainWindow(QMainWindow):
         self.open_folder_btn.clicked.connect(self._open_output_folder)
         self.clear_log_btn.clicked.connect(self.log_text.clear)
 
-    def _apply_styles(self):
-        """Apply custom styling to the application."""
-        self.setStyleSheet("""
-            QGroupBox {
+    def _apply_garanti_theme(self):
+        """Apply Garanti BBVA corporate theme stylesheet."""
+        self.setStyleSheet(f"""
+            /* Main Window */
+            QMainWindow {{
+                background-color: {GarantiColors.LIGHT_GREY};
+            }}
+            
+            QWidget {{
+                font-family: 'Segoe UI', 'Arial', sans-serif;
+                font-size: 13px;
+                color: {GarantiColors.DARK_GREY};
+            }}
+            
+            /* Header */
+            QLabel#header {{
+                font-size: 22px;
                 font-weight: bold;
-                border: 1px solid #bdc3c7;
-                border-radius: 6px;
-                margin-top: 12px;
-                padding-top: 10px;
-            }
-            QGroupBox::title {
+                color: {GarantiColors.PRIMARY_GREEN};
+                padding: 8px 0 16px 0;
+            }}
+            
+            /* Group Boxes */
+            QGroupBox#settingsGroup {{
+                background-color: {GarantiColors.WHITE};
+                border: 1px solid {GarantiColors.MEDIUM_GREY};
+                border-radius: 8px;
+                margin-top: 16px;
+                padding-top: 12px;
+                font-weight: bold;
+                color: {GarantiColors.PRIMARY_GREEN};
+            }}
+            
+            QGroupBox#settingsGroup::title {{
                 subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
-            }
-            QLineEdit, QSpinBox, QComboBox {
-                padding: 6px;
-                border: 1px solid #bdc3c7;
+                left: 16px;
+                padding: 0 8px;
+                background-color: {GarantiColors.WHITE};
+            }}
+            
+            /* Input Fields */
+            QLineEdit#inputField, QSpinBox#inputField {{
+                padding: 10px 12px;
+                border: 2px solid {GarantiColors.MEDIUM_GREY};
+                border-radius: 6px;
+                background-color: {GarantiColors.WHITE};
+                font-size: 13px;
+            }}
+            
+            QLineEdit#inputField:focus, QSpinBox#inputField:focus {{
+                border-color: {GarantiColors.PRIMARY_GREEN};
+            }}
+            
+            /* Multi-line Input */
+            QTextEdit#multiLineInput {{
+                padding: 8px;
+                border: 2px solid {GarantiColors.MEDIUM_GREY};
+                border-radius: 6px;
+                background-color: {GarantiColors.WHITE};
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 12px;
+            }}
+            
+            QTextEdit#multiLineInput:focus {{
+                border-color: {GarantiColors.PRIMARY_GREEN};
+            }}
+            
+            /* Log Area */
+            QTextEdit#logArea {{
+                padding: 8px;
+                border: 2px solid {GarantiColors.MEDIUM_GREY};
+                border-radius: 6px;
+                background-color: #FAFAFA;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 11px;
+                color: {GarantiColors.DARK_GREY};
+            }}
+            
+            /* Primary Button (Green) */
+            QPushButton#primaryButton {{
+                background-color: {GarantiColors.PRIMARY_GREEN};
+                color: {GarantiColors.WHITE};
+                font-weight: bold;
+                font-size: 14px;
+                border: none;
+                border-radius: 6px;
+                padding: 0 24px;
+                min-width: 160px;
+            }}
+            
+            QPushButton#primaryButton:hover {{
+                background-color: {GarantiColors.DARK_GREEN};
+            }}
+            
+            QPushButton#primaryButton:disabled {{
+                background-color: {GarantiColors.MEDIUM_GREY};
+                color: {GarantiColors.TEXT_SECONDARY};
+            }}
+            
+            /* Secondary Button */
+            QPushButton#secondaryButton {{
+                background-color: {GarantiColors.WHITE};
+                color: {GarantiColors.PRIMARY_GREEN};
+                font-weight: 600;
+                border: 2px solid {GarantiColors.PRIMARY_GREEN};
+                border-radius: 6px;
+                padding: 0 16px;
+            }}
+            
+            QPushButton#secondaryButton:hover {{
+                background-color: {GarantiColors.LIGHT_GREY};
+            }}
+            
+            QPushButton#secondaryButton:disabled {{
+                border-color: {GarantiColors.MEDIUM_GREY};
+                color: {GarantiColors.TEXT_SECONDARY};
+            }}
+            
+            /* Danger Button */
+            QPushButton#dangerButton {{
+                background-color: {GarantiColors.WHITE};
+                color: {GarantiColors.ERROR_RED};
+                font-weight: 600;
+                border: 2px solid {GarantiColors.ERROR_RED};
+                border-radius: 6px;
+                padding: 0 16px;
+            }}
+            
+            QPushButton#dangerButton:hover {{
+                background-color: #FDEDEC;
+            }}
+            
+            QPushButton#dangerButton:disabled {{
+                border-color: {GarantiColors.MEDIUM_GREY};
+                color: {GarantiColors.TEXT_SECONDARY};
+            }}
+            
+            /* Checkboxes */
+            QCheckBox {{
+                spacing: 8px;
+                color: {GarantiColors.DARK_GREY};
+            }}
+            
+            QCheckBox::indicator {{
+                width: 18px;
+                height: 18px;
+                border: 2px solid {GarantiColors.MEDIUM_GREY};
                 border-radius: 4px;
-            }
-            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
-                border-color: #3498db;
-            }
-            QPushButton {
-                padding: 6px 16px;
-                border: 1px solid #bdc3c7;
+                background-color: {GarantiColors.WHITE};
+            }}
+            
+            QCheckBox::indicator:checked {{
+                background-color: {GarantiColors.PRIMARY_GREEN};
+                border-color: {GarantiColors.PRIMARY_GREEN};
+            }}
+            
+            /* Labels */
+            QLabel#helpText {{
+                color: {GarantiColors.TEXT_SECONDARY};
+                font-size: 12px;
+            }}
+            
+            QLabel#warningLabel {{
+                color: {GarantiColors.WARNING_ORANGE};
+                font-weight: bold;
+                font-size: 12px;
+            }}
+            
+            QLabel#statsLabel {{
+                color: {GarantiColors.PRIMARY_GREEN};
+                font-weight: bold;
+                font-size: 13px;
+            }}
+            
+            /* Status Bar */
+            QLabel#statusBar {{
+                padding: 8px 12px;
+                background-color: {GarantiColors.WHITE};
+                border: 1px solid {GarantiColors.MEDIUM_GREY};
                 border-radius: 4px;
-                background-color: #ecf0f1;
-            }
-            QPushButton:hover {
-                background-color: #d5dbdb;
-            }
-            QPushButton:disabled {
-                color: #95a5a6;
-            }
-            QTextEdit {
-                border: 1px solid #bdc3c7;
+                color: {GarantiColors.TEXT_SECONDARY};
+            }}
+            
+            /* Progress Bar */
+            QProgressBar#progressBar {{
+                border: none;
                 border-radius: 4px;
-            }
+                background-color: {GarantiColors.MEDIUM_GREY};
+            }}
+            
+            QProgressBar#progressBar::chunk {{
+                background-color: {GarantiColors.PRIMARY_GREEN};
+                border-radius: 4px;
+            }}
+            
+            /* Spin Box */
+            QSpinBox {{
+                padding: 8px;
+                border: 2px solid {GarantiColors.MEDIUM_GREY};
+                border-radius: 6px;
+            }}
+            
+            QSpinBox:focus {{
+                border-color: {GarantiColors.PRIMARY_GREEN};
+            }}
         """)
 
     # =========================================================================
     # Slot Methods
     # =========================================================================
-
-    @Slot()
-    def _on_timeframe_changed(self):
-        """Toggle custom timeframe inputs visibility."""
-        is_custom = self.timeframe_combo.currentIndex() == 1
-        self.custom_time_widget.setVisible(is_custom)
 
     @Slot()
     def _on_ssl_changed(self):
@@ -434,16 +662,16 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Token Status",
-                "✓ API token detected (not displayed for security).\n\n"
-                f"Token length: {len(token)} characters"
+                f"✓ API token detected\n\n"
+                f"Length: {len(token)} characters\n"
+                f"(Token value is not displayed for security)"
             )
         else:
             QMessageBox.warning(
                 self,
                 "Token Not Found",
                 "API token not found!\n\n"
-                "Please set the environment variable:\n"
-                "DYNATRACE_API_TOKEN=your_token_here\n\n"
+                "Please set the environment variable:\n\n"
                 "Windows (PowerShell):\n"
                 '$env:DYNATRACE_API_TOKEN = "your_token"\n\n'
                 "Linux/macOS:\n"
@@ -452,15 +680,23 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _browse_output(self):
-        """Open file dialog to select output CSV path."""
+        """Open file dialog to select output file path."""
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "Save Topology CSV",
-            str(Path.home() / "service_topology.csv"),
-            "CSV Files (*.csv);;All Files (*)"
+            "Save Topology Export",
+            str(Path.home() / "service_topology.xlsx"),
+            "Excel Files (*.xlsx);;CSV Files (*.csv);;GraphML Files (*.graphml);;All Files (*)"
         )
         if path:
             self.output_path_input.setText(path)
+
+    def _get_root_ids(self) -> List[str]:
+        """Parse root service IDs from the text input."""
+        text = self.root_ids_input.toPlainText()
+        lines = text.strip().split("\n")
+        # Filter empty lines and strip whitespace
+        ids = [line.strip() for line in lines if line.strip()]
+        return ids
 
     def _get_config(self) -> Optional[ClientConfig]:
         """Build ClientConfig from UI inputs, or None if validation fails."""
@@ -491,20 +727,11 @@ class MainWindow(QMainWindow):
             self.base_url_input.setFocus()
             return None
 
-        # Get timeframe
-        from_time = None
-        to_time = None
-        if self.timeframe_combo.currentIndex() == 1:  # Custom
-            from_time = self.from_input.text().strip() or None
-            to_time = self.to_input.text().strip() or None
-
         return ClientConfig(
             base_url=base_url.rstrip("/"),
             api_token=token,
             verify_ssl=self.ssl_checkbox.isChecked(),
-            page_size=self.page_size_spin.value(),
-            from_time=from_time,
-            to_time=to_time,
+            batch_size=self.batch_size_spin.value(),
         )
 
     @Slot()
@@ -530,14 +757,25 @@ class MainWindow(QMainWindow):
             self.log_text.append("✓ Connection test successful")
             QMessageBox.information(self, "Connection Test", message)
         else:
-            self.log_text.append(f"✗ Connection test failed: {message}")
+            self.log_text.append(f"✗ Connection test failed")
             QMessageBox.critical(self, "Connection Test Failed", message)
 
     @Slot()
     def _run_export(self):
-        """Start the topology export process."""
+        """Start the recursive topology discovery."""
         config = self._get_config()
         if not config:
+            return
+
+        # Validate root IDs
+        root_ids = self._get_root_ids()
+        if not root_ids:
+            QMessageBox.critical(
+                self,
+                "Validation Error",
+                "Please enter at least one Root Service ID."
+            )
+            self.root_ids_input.setFocus()
             return
 
         # Validate output path
@@ -545,6 +783,17 @@ class MainWindow(QMainWindow):
         if not output_path:
             QMessageBox.critical(self, "Validation Error", "Output file path is required.")
             self.browse_btn.click()
+            return
+
+        # Check at least one export format is selected
+        if not (self.excel_checkbox.isChecked() or 
+                self.csv_checkbox.isChecked() or 
+                self.graphml_checkbox.isChecked()):
+            QMessageBox.critical(
+                self,
+                "Validation Error",
+                "Please select at least one export format."
+            )
             return
 
         # Ensure directory exists
@@ -561,21 +810,17 @@ class MainWindow(QMainWindow):
                 return
 
         # Start export
-        self._set_ui_running(True, "Exporting topology...")
-        self.log_text.append("=" * 50)
-        self.log_text.append("🚀 Starting Topology Export")
-        self.log_text.append("=" * 50)
-        self.log_text.append(f"   Base URL: {config.base_url}")
-        self.log_text.append(f"   Page Size: {config.page_size}")
-        self.log_text.append(f"   SSL Verify: {config.verify_ssl}")
-        self.log_text.append(f"   Output: {output_path}")
-        if config.from_time:
-            self.log_text.append(f"   From: {config.from_time}")
-        if config.to_time:
-            self.log_text.append(f"   To: {config.to_time}")
-        self.log_text.append("")
+        self._set_ui_running(True, "Discovering topology...")
+        self.log_text.clear()
 
-        self._export_worker = ExportWorker(config, output_path)
+        self._export_worker = ExportWorker(
+            config=config,
+            root_ids=root_ids,
+            output_path=output_path,
+            export_excel=self.excel_checkbox.isChecked(),
+            export_csv=self.csv_checkbox.isChecked(),
+            export_graphml=self.graphml_checkbox.isChecked(),
+        )
         self._export_worker.log_message.connect(self._on_log_message)
         self._export_worker.progress_update.connect(self._on_progress_update)
         self._export_worker.finished.connect(self._on_export_finished)
@@ -589,11 +834,18 @@ class MainWindow(QMainWindow):
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
-    @Slot(int, int, str)
-    def _on_progress_update(self, entities: int, edges: int, status: str):
+    @Slot(int, int, int, str)
+    def _on_progress_update(self, depth: int, services: int, edges: int, status: str):
         """Update progress statistics."""
-        self.stats_label.setText(f"Services: {entities}  |  Edges: {edges}")
+        self.stats_label.setText(
+            f"Depth: {depth}  |  Services: {services}  |  Edges: {edges}"
+        )
         self.status_label.setText(status)
+        self.status_label.setStyleSheet(
+            f"padding: 8px 12px; background-color: {GarantiColors.WHITE}; "
+            f"border: 1px solid {GarantiColors.MEDIUM_GREY}; border-radius: 4px; "
+            f"color: {GarantiColors.PRIMARY_GREEN}; font-weight: bold;"
+        )
 
     @Slot(object)
     def _on_export_finished(self, result: ExportResult):
@@ -601,33 +853,45 @@ class MainWindow(QMainWindow):
         self._set_ui_running(False)
 
         if result.success:
-            self.status_label.setText(f"✓ Completed: {result.total_edges} edges exported")
-            self.status_label.setStyleSheet("padding: 4px; color: #27ae60; font-weight: bold;")
+            self.status_label.setText(
+                f"✓ Completed: {result.total_services} services, {result.total_edges} edges"
+            )
+            self.status_label.setStyleSheet(
+                f"padding: 8px 12px; background-color: {GarantiColors.WHITE}; "
+                f"border: 1px solid {GarantiColors.SUCCESS_GREEN}; border-radius: 4px; "
+                f"color: {GarantiColors.SUCCESS_GREEN}; font-weight: bold;"
+            )
             self.open_folder_btn.setEnabled(True)
             
+            files_list = "\n".join(f"• {f}" for f in result.output_files)
             QMessageBox.information(
                 self,
                 "Export Complete",
-                f"Topology export completed successfully!\n\n"
-                f"Services: {result.total_services}\n"
-                f"Edges: {result.total_edges}\n"
-                f"Output: {result.output_file}"
+                f"Topology discovery completed successfully!\n\n"
+                f"Services Discovered: {result.total_services}\n"
+                f"Edges (CALLS): {result.total_edges}\n"
+                f"Max Depth: {result.traversal_depth}\n\n"
+                f"Output Files:\n{files_list}"
             )
         else:
-            self.status_label.setText(f"✗ Error: {result.message[:50]}...")
-            self.status_label.setStyleSheet("padding: 4px; color: #e74c3c; font-weight: bold;")
+            self.status_label.setText(f"✗ Error: {result.message[:60]}...")
+            self.status_label.setStyleSheet(
+                f"padding: 8px 12px; background-color: {GarantiColors.WHITE}; "
+                f"border: 1px solid {GarantiColors.ERROR_RED}; border-radius: 4px; "
+                f"color: {GarantiColors.ERROR_RED}; font-weight: bold;"
+            )
             
             QMessageBox.critical(
                 self,
                 "Export Failed",
-                f"Topology export failed:\n\n{result.message}"
+                f"Topology discovery failed:\n\n{result.message}"
             )
 
     @Slot()
     def _cancel_export(self):
         """Cancel the running export."""
         if self._export_worker and self._export_worker.isRunning():
-            self.log_text.append("⚠ Cancelling export...")
+            self.log_text.append("⚠ Cancelling discovery...")
             self._export_worker.cancel()
 
     @Slot()
@@ -661,16 +925,18 @@ class MainWindow(QMainWindow):
         """Enable/disable UI elements based on running state."""
         # Disable inputs while running
         self.base_url_input.setEnabled(not running)
-        self.timeframe_combo.setEnabled(not running)
-        self.from_input.setEnabled(not running)
-        self.to_input.setEnabled(not running)
-        self.page_size_spin.setEnabled(not running)
+        self.batch_size_spin.setEnabled(not running)
         self.ssl_checkbox.setEnabled(not running)
+        self.root_ids_input.setEnabled(not running)
         self.output_path_input.setEnabled(not running)
         self.browse_btn.setEnabled(not running)
+        self.excel_checkbox.setEnabled(not running)
+        self.csv_checkbox.setEnabled(not running)
+        self.graphml_checkbox.setEnabled(not running)
 
         # Toggle buttons
         self.test_conn_btn.setEnabled(not running)
+        self.check_token_btn.setEnabled(not running)
         self.run_export_btn.setEnabled(not running)
         self.cancel_btn.setEnabled(running)
         
@@ -683,10 +949,18 @@ class MainWindow(QMainWindow):
         # Status
         if status:
             self.status_label.setText(status)
-            self.status_label.setStyleSheet("padding: 4px; color: #3498db; font-weight: bold;")
+            self.status_label.setStyleSheet(
+                f"padding: 8px 12px; background-color: {GarantiColors.WHITE}; "
+                f"border: 1px solid {GarantiColors.PRIMARY_GREEN}; border-radius: 4px; "
+                f"color: {GarantiColors.PRIMARY_GREEN}; font-weight: bold;"
+            )
         elif not running:
             self.status_label.setText("Ready")
-            self.status_label.setStyleSheet("padding: 4px; color: #7f8c8d;")
+            self.status_label.setStyleSheet(
+                f"padding: 8px 12px; background-color: {GarantiColors.WHITE}; "
+                f"border: 1px solid {GarantiColors.MEDIUM_GREY}; border-radius: 4px; "
+                f"color: {GarantiColors.TEXT_SECONDARY};"
+            )
 
     def closeEvent(self, event):
         """Handle window close - cancel any running workers."""
@@ -698,9 +972,9 @@ class MainWindow(QMainWindow):
         event.accept()
 
 
-# ============================================================================
+# =============================================================================
 # Application Entry Point
-# ============================================================================
+# =============================================================================
 
 def main():
     """Application entry point."""
@@ -709,10 +983,10 @@ def main():
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Dynatrace Topology Exporter")
-    app.setOrganizationName("Dynatrace Tools")
+    app.setApplicationName("Dynatrace Topology Discoverer")
+    app.setOrganizationName("Garanti BBVA")
     
-    # Set application style
+    # Use Fusion style for consistent cross-platform look
     app.setStyle("Fusion")
 
     window = MainWindow()
@@ -723,4 +997,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

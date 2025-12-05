@@ -1,3 +1,14 @@
+# Dynatrace Service Topology Exporter - Dependencies
+# ================================================
+
+# HTTP Client
 requests>=2.28.0
-PySide6>=6.5.0
 urllib3>=2.0.0
+
+# GUI Framework
+PySide6>=6.5.0
+
+# Data Processing & Export
+pandas>=2.0.0
+openpyxl>=3.1.0      # Excel export support
+networkx>=3.0        # Graph operations and GraphML export
